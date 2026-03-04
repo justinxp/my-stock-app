@@ -44,16 +44,46 @@ def fetch_stock_data(ticker, years):
 
 @st.cache_data(ttl=3600)
 def fetch_financials(full_ticker):
+    """加強版財務抓取：加入 Session 偽裝並使用備援邏輯"""
     try:
-        tk = yf.Ticker(full_ticker)
+        # 1. 建立 Session 並偽裝成一般瀏覽器，避免雲端 IP 被擋
+        import requests
+        session = requests.Session()
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'
+        })
+        
+        # 2. 傳入 session 進行抓取
+        tk = yf.Ticker(full_ticker, session=session)
         info = tk.info
+        
+        # 3. 檢查 info 是否有效，若無效嘗試用快取資訊
+        if not info or len(info) < 5:
+            # 嘗試抓取基本的股利歷史作為備援
+            div_val = 0
+            try:
+                df_div = tk.dividends
+                if not df_div.empty:
+                    # 計算最近一年股利總和 / 當前股價
+                    div_val = (df_div.tail(4).sum() / tk.fast_info.last_price) * 100
+            except:
+                pass
+            
+            return {
+                "eps": "N/A", 
+                "div": div_val, 
+                "pe": "N/A", 
+                "name": full_ticker
+            }
+
+        # 4. 正常回傳
         return {
             "eps": info.get('trailingEps', "N/A"),
             "div": (info.get('trailingAnnualDividendYield', 0) or 0) * 100,
             "pe": info.get('trailingPE', "N/A"),
             "name": info.get('longName', full_ticker)
         }
-    except:
+    except Exception as e:
         return {"eps": "N/A", "div": 0, "pe": "N/A", "name": full_ticker}
 
 
@@ -174,3 +204,4 @@ else:
         st.plotly_chart(fig_comp, use_container_width=True)
 
 st.markdown("---")
+
