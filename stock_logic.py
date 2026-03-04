@@ -18,16 +18,27 @@ train_years = st.sidebar.slider("訓練數據年數:", 1, 10, 5)
 predict_days = st.sidebar.slider("預測未來天數:", 30, 365, 90)
 
 
-@st.cache_data(ttl=300)  # 籌碼與技術面建議 5 分鐘更新一次
+@st.cache@st.cache_data(ttl=300)
 def load_data(ticker, years):
-    full_ticker = f"{ticker}.TW"
     start = date(date.today().year - years, 1, 1).strftime("%Y-%m-%d")
-    df = yf.download(full_ticker, start=start, auto_adjust=False, actions=True)
-    if df.empty: return None
+    
+    # 嘗試第一種：上市代碼 (.TW)
+    full_ticker_tw = f"{ticker}.TW"
+    df = yf.download(full_ticker_tw, start=start, auto_adjust=False)
+    
+    # 如果找不到，嘗試第二種：上櫃代碼 (.TWO)
+    if df.empty:
+        full_ticker_two = f"{ticker}.TWO"
+        df = yf.download(full_ticker_two, start=start, auto_adjust=False)
+        
+    if df.empty: 
+        return None
+        
     df.reset_index(inplace=True)
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
     return df
+
 
 
 # 3. 主畫面
