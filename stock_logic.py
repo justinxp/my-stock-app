@@ -7,12 +7,7 @@ from datetime import date
 import plotly.graph_objects as go
 
 # --- 1. 網頁配置 ---
-st.set_page_config(
-    page_title="AI 股市旗艦分析系統",
-    page_icon="📈",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+st.set_page_config(page_title="AI 股市旗艦分析系統", page_icon="📈", layout="wide")
 
 # 自定義 CSS
 st.markdown("""
@@ -25,152 +20,148 @@ st.markdown("""
 # --- 2. 側邊欄設定 ---
 with st.sidebar:
     st.header("⚙️ 系統核心設定")
-    ticker_input = st.text_input("🚀 輸入股票代碼 (多個請用逗號隔開):", "2330, 0050")
-    tickers = [t.strip() for t in ticker_input.split(",")]
+    # 修改點：移除預設代碼，改為空白提示
+    ticker_input = st.text_input("🚀 輸入股票代碼 (多個請用逗號隔開):", value="", placeholder="例如: 2330, 0050, TSLA")
+    tickers = [t.strip() for t in ticker_input.split(",") if t.strip()]
+
     st.markdown("---")
+    st.subheader("📊 AI 運算參數")
     train_years = st.slider("訓練數據年數:", 1, 10, 5)
     predict_days = st.slider("預測未來天數:", 30, 365, 90)
-    st.caption(f"數據更新日期: {date.today()}\n版本：v6.1 修復穩定版")
+    st.caption(f"版本：v7.0 專業純淨版")
 
 
-# --- 3. 數據抓取邏輯 (修正快取報錯問題) ---
+# --- 3. 核心數據函數 ---
 
-# 僅快取財務文字資訊 (Info 是 dict，可以被 pickle)
-@st.cache_data(ttl=3600)
-def get_stock_financials(ticker):
+@st.cache_data(ttl=300)
+def fetch_stock_data(ticker, years):
+    """抓取歷史價格並處理後綴與欄位"""
     for suffix in [".TW", ".TWO", ""]:
         full_ticker = f"{ticker}{suffix}" if suffix else ticker
         try:
-            s = yf.Ticker(full_ticker)
-            info = s.info
-            if 'symbol' in info:
-                return info, full_ticker
+            df = yf.download(full_ticker, start=f"{date.today().year - years}-01-01", auto_adjust=False, progress=False)
+            if not df.empty:
+                df.reset_index(inplace=True)
+                # 拍平多重索引確保不噴 KeyError
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = df.columns.get_level_values(0)
+                return df, full_ticker
         except:
             continue
     return None, None
 
 
-# 快取歷史價格數據 (DataFrame 可以被 pickle)
-@st.cache_data(ttl=300)
-def load_historical_data(full_ticker, years):
-    start = date(date.today().year - years, 1, 1).strftime("%Y-%m-%d")
+@st.cache_data(ttl=3600)
+def fetch_financials(full_ticker):
+    """抓取基本面數據 (EPS/股利)"""
     try:
-        df = yf.download(full_ticker, start=start, auto_adjust=False, progress=False)
-        if df.empty: return None
-        df.reset_index(inplace=True)
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        return df
+        info = yf.Ticker(full_ticker).info
+        return {
+            "eps": info.get('trailingEps', "N/A"),
+            "div": info.get('trailingAnnualDividendYield', 0) * 100,
+            "pe": info.get('trailingPE', "N/A"),
+            "name": info.get('longName', full_ticker)
+        }
     except:
-        return None
+        return {"eps": "N/A", "div": 0, "pe": "N/A", "name": full_ticker}
 
 
-# --- 4. 主畫面 ---
+# --- 4. 主畫面邏輯 ---
 st.title("🛡️ AI 旗艦級股市分析系統")
 
-all_forecasts = []
-
-for ticker in tickers:
-    # 步驟 1: 獲取財務資訊與正確的帶後綴代碼
-    info, full_ticker = get_stock_financials(ticker)
-
-    if info and full_ticker:
-        # 步驟 2: 獲取歷史數據
-        df = load_historical_data(full_ticker, train_years)
+if not tickers:
+    st.info("💡 請在左側輸入股票代碼以開始分析（例如輸入 `2330` 後按 Enter）。")
+else:
+    all_forecasts = []
+    for ticker in tickers:
+        df, full_name = fetch_stock_data(ticker, train_years)
 
         if df is not None:
-            # --- A. 指標計算 ---
-            last_price = float(df['Close'].iloc[-1])
-            prev_price = float(df['Close'].iloc[-2])
-            change = last_price - prev_price
-            change_pct = (change / prev_price) * 100
-
-            # 財務指標
-            eps = info.get('trailingEps', 'N/A')
-            div_yield = info.get('trailingAnnualDividendYield', 0) * 100
-            pe_ratio = info.get('trailingPE', 'N/A')
-
-            # 技術指標 (RSI, 布林)
+            # 計算技術指標
             df['MA20'] = df['Close'].rolling(20).mean()
             std = df['Close'].rolling(20).std()
             df['Upper'] = df['MA20'] + (std * 2)
             df['Lower'] = df['MA20'] - (std * 2)
 
-            delta = df['Close'].diff()
-            gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-            loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-            rsi = 100 - (100 / (1 + (gain / loss))).iloc[-1]
+            # 漲幅計算
+            last_price = float(df['Close'].iloc[-1])
+            prev_price = float(df['Close'].iloc[-2])
+            day_change = last_price - prev_price
+            day_pct = (day_change / prev_price) * 100
 
-            # --- B. AI 預測 ---
+            f_info = fetch_financials(full_name)
+
+            # AI 預測
             with st.spinner(f"正在分析 {ticker}..."):
                 df_p = df[['Date', 'Close']].rename(columns={"Date": "ds", "Close": "y"})
                 df_p['ds'] = pd.to_datetime(df_p['ds']).dt.tz_localize(None)
                 m = Prophet(daily_seasonality=True).fit(df_p)
                 future = m.make_future_dataframe(periods=predict_days)
                 fc = m.predict(future)
-                future_trend = ((fc['yhat'].iloc[-1] - last_price) / last_price) * 100
+                ai_trend = ((fc['yhat'].iloc[-1] - last_price) / last_price) * 100
 
-            # --- C. 🧭 綜合診斷報告 ---
+            # --- 顯示診斷報告 ---
             st.divider()
-            st.subheader(f"📊 {ticker} 綜合診斷與財務概況")
+            st.subheader(f"📊 {f_info['name']} ({ticker}) 綜合分析")
 
-            c1, c2, c3, c4, c5 = st.columns(5)
-            c1.metric("收盤價", f"{last_price:.2f}", f"{change_pct:.2f}%")
-            c2.metric("當日高/低", f"{df['High'].iloc[-1]:.1f}", f"{df['Low'].iloc[-1]:.1f}", delta_color="off")
-            c3.metric("EPS (盈餘)", f"{eps}")
-            c4.metric("股息殖利率", f"{div_yield:.2f}%")
-            c5.metric("本益比", f"{pe_ratio}")
+            col1, col2, col3, col4, col5 = st.columns(5)
+            # 強化漲幅 % 顯示
+            col1.metric("當前收盤", f"{last_price:.2f}", f"{day_change:+.2f} ({day_pct:+.2f}%)")
+            col2.metric("當日高/低", f"{df['High'].iloc[-1]:.1f}", f"{df['Low'].iloc[-1]:.1f}", delta_color="off")
+            col3.metric("EPS (盈餘)", f"{f_info['eps']}")
+            col4.metric("股息殖利率", f"{f_info['div']:.2f}%")
+            col5.metric("本益比 (P/E)", f"{f_info['pe']}")
 
-            # 導航儀建議
-            st.info(f"**💡 時機建議：** " +
-                    ("建議分批進場" if future_trend > 5 and rsi < 40 else
-                     "建議分批獲利" if future_trend < -3 and rsi > 65 else
-                     "持股觀望"))
+            # 交易導航
+            st.write(f"**🧭 智能建議：** " +
+                     ("🟢 建議佈局 (預期漲幅大)" if ai_trend > 6 else
+                      "🔴 建議減碼 (預期修正)" if ai_trend < -4 else "⚪ 持股觀望"))
 
-            # --- D. 圖表分頁 ---
-            t1, t2, t3 = st.tabs(["📈 趨勢/布林", "📊 MACD", "🔮 AI 預測"])
+            # 分頁圖表
+            t1, t2, t3 = st.tabs(["📈 趨勢/布林", "📊 MACD 動能", "🔮 AI 深度預測"])
             with t1:
                 fig = go.Figure()
-                fig.add_trace(go.Scatter(x=df['Date'], y=df['Upper'], name='上軌',
-                                         line=dict(dash='dash', color='rgba(200,200,200,0.3)')))
-                fig.add_trace(go.Scatter(x=df['Date'], y=df['Lower'], name='下軌',
-                                         line=dict(dash='dash', color='rgba(200,200,200,0.3)'), fill='tonexty'))
-                fig.add_trace(go.Scatter(x=df['Date'], y=df['Close'], name='收盤價', line=dict(color='#1f77b4')))
-                fig.update_layout(height=450, margin=dict(l=0, r=0, b=0, t=20))
-                st.plotly_chart(fig, width='stretch')
+                fig.add_trace(go.Scatter(x=df['Date'], y=df['Upper'], name='布林上軌',
+                                         line=dict(dash='dash', color='rgba(150,150,150,0.5)')))
+                fig.add_trace(go.Scatter(x=df['Date'], y=df['Lower'], name='布林下軌',
+                                         line=dict(dash='dash', color='rgba(150,150,150,0.5)'), fill='tonexty'))
+                fig.add_trace(
+                    go.Scatter(x=df['Date'], y=df['Close'], name='收盤價', line=dict(color='#1f77b4', width=2)))
+                fig.update_layout(height=450, hovermode="x unified")
+                st.plotly_chart(fig, use_container_width=True)
 
             with t2:
-                # 快速計算 MACD
-                short_ema = df['Close'].ewm(span=12).mean()
-                long_ema = df['Close'].ewm(span=26).mean()
-                macd_line = short_ema - long_ema
-                signal_line = macd_line.ewm(span=9).mean()
+                short = df['Close'].ewm(span=12).mean()
+                long = df['Close'].ewm(span=26).mean()
+                macd = short - long
+                sig = macd.ewm(span=9).mean()
                 fig_m = go.Figure()
-                fig_m.add_trace(go.Bar(x=df['Date'], y=macd_line - signal_line, name='Hist'))
-                fig_m.add_trace(go.Scatter(x=df['Date'], y=macd_line, name='DIF'))
+                fig_m.add_trace(go.Bar(x=df['Date'], y=macd - sig, name='柱狀體'))
+                fig_m.add_trace(go.Scatter(x=df['Date'], y=macd, name='DIF快線'))
                 fig_m.update_layout(height=400)
-                st.plotly_chart(fig_m, width='stretch')
+                st.plotly_chart(fig_m, use_container_width=True)
 
             with t3:
-                fig_ai = plot_plotly(m, fc)
-                st.plotly_chart(fig_ai, width='stretch')
-
-                # 多股對比準備
+                st.plotly_chart(plot_plotly(m, fc), use_container_width=True)
+                # 報酬率收集
                 base = fc.iloc[-predict_days - 1]['yhat']
                 fc['return_pct'] = (fc['yhat'] - base) / base * 100
                 temp_f = fc[['ds', 'return_pct']].tail(predict_days).copy()
                 temp_f['ticker'] = ticker
                 all_forecasts.append(temp_f)
-    else:
-        st.error(f"無法獲取 {ticker} 的資訊。")
+        else:
+            st.error(f"無法獲取代碼 {ticker} 的歷史數據，請檢查格式。")
 
-# --- 6. 多股對比 ---
-if len(all_forecasts) > 1:
-    st.divider()
-    st.header("🏁 多股 AI 預期報酬率對比")
-    comp_df = pd.concat(all_forecasts)
-    fig_comp = go.Figure()
-    for t in tickers:
-        t_data = comp_df[comp_df['ticker'] == t]
-        fig_comp.add_trace(go.Scatter(x=t_data['ds'], y=t_data['return_pct'], name=t))
-    st.plotly_chart(fig_comp, width='stretch')
+    # 多股對比
+    if len(all_forecasts) > 1:
+        st.divider()
+        st.header("🏁 多股 AI 預期報酬率對比 (%)")
+        comp_df = pd.concat(all_forecasts)
+        fig_comp = go.Figure()
+        for t in tickers:
+            t_data = comp_df[comp_df['ticker'] == t]
+            fig_comp.add_trace(go.Scatter(x=t_data['ds'], y=t_data['return_pct'], name=t))
+        st.plotly_chart(fig_comp, use_container_width=True)
+
+st.markdown("---")
+st.caption("⚠️ 本工具僅供參考，不代表投資建議。數據來源：Yahoo Finance")
