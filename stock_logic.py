@@ -161,3 +161,5 @@ else:
         st.plotly_chart(fig_comp, use_container_width=True)
 
 st.markdown("---")
+st.caption("⚠️ 本工具僅供 AI 技術研究參考，不構成投資建議，投資人應獨立評估風險。")
+
