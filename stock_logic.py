@@ -73,19 +73,44 @@ def fetch_stock_data(ticker, years):
 
 @st.cache_data(ttl=3600)
 def fetch_financials(full_ticker):
-    """安全獲取 EPS 與股利資訊"""
+    """加強版：多重來源抓取財務指標"""
     try:
         tk = yf.Ticker(full_ticker)
+        # 優先嘗試 info
         info = tk.info
+        
+        # 備援機制：如果 info 為空或關鍵欄位缺失，嘗試從 fast_info 獲取
+        eps = info.get('trailingEps')
+        if eps is None or eps == "N/A":
+            # 某些標的 (如 ETF) 本來就沒有 EPS，顯示 0.0 或 --
+            eps = "N/A"
+            
+        div = info.get('trailingAnnualDividendYield')
+        if div is None:
+            # 嘗試抓取股利歷史紀錄來估算
+            try:
+                div_history = tk.dividends
+                if not div_history.empty:
+                    # 取最近一年的股利總和
+                    last_year_div = div_history.tail(4).sum()
+                    price = info.get('regularMarketPrice', 1)
+                    div = (last_year_div / price) if price else 0
+                else:
+                    div = 0
+            except:
+                div = 0
+                
+        pe = info.get('trailingPE', "N/A")
+        
         return {
-            "eps": info.get('trailingEps', "N/A"),
-            "div": info.get('trailingAnnualDividendYield', 0) * 100,
-            "pe": info.get('trailingPE', "N/A"),
+            "eps": eps,
+            "div": div * 100 if isinstance(div, (int, float)) else 0,
+            "pe": pe,
             "name": info.get('longName', full_ticker)
         }
-    except:
+    except Exception as e:
+        # 最終保險門檻
         return {"eps": "N/A", "div": 0, "pe": "N/A", "name": full_ticker}
-
 
 # --- 4. 主畫面邏輯 ---
 st.title("🛡️ AI 旗艦級股市分析系統")
@@ -191,3 +216,4 @@ else:
 
 st.markdown("---")
 st.caption("⚠️ 免責聲明：本工具基於 AI 模型預測，僅供學術研究參考，不構成任何投資建議。投資一定有風險。")
+
